@@ -1,0 +1,69 @@
+package com.example.wardrobeapp
+
+import android.app.Activity
+import android.graphics.Color
+import android.os.Bundle
+import android.util.TypedValue
+import android.view.View
+import android.view.ViewGroup
+import android.widget.FrameLayout
+import android.webkit.WebView
+import android.webkit.WebViewClient
+
+class MainActivity : Activity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+
+        // ベースの layout（画面全体）
+        val root = FrameLayout(this)
+
+        // 🔴 青いバーを完全遮断する黒いビュー
+        val topMask = View(this)
+        topMask.setBackgroundColor(Color.BLACK)
+
+        // ご主人様のスクショを見る限り、80dp くらい隠せば安全
+        val maskHeight = dp(49f)  // 調整OK！
+
+        val maskParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            maskHeight
+        )
+        maskParams.topMargin = 0
+        topMask.layoutParams = maskParams
+
+        // 🟢 WebView
+        val webView = WebView(this)
+        webView.settings.javaScriptEnabled = true
+        webView.settings.domStorageEnabled = true
+        webView.settings.userAgentString =
+            "Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36"
+        webView.webViewClient = WebViewClient()
+
+        // 🟡 WebView を赤い枠くらいまでに固定（上を隠す）
+        val webParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT
+        )
+        webParams.topMargin = -maskHeight  // ← 表示領域を上にズラす(青バーを上に追いやる)
+        webParams.bottomMargin = dp(70f)   // ← 下のナビゲーションバーの被り対策
+
+        webView.layoutParams = webParams
+
+        // URL 読み込み 自分のgasのURLを入れる
+        webView.loadUrl("")
+
+        // 画面に要素を追加
+        root.addView(webView)
+        root.addView(topMask)  // ← 黒いマスクで上を完全遮断
+
+        setContentView(root)
+    }
+
+    private fun dp(value: Float): Int {
+        return TypedValue.applyDimension(
+            TypedValue.COMPLEX_UNIT_DIP,
+            value,
+            resources.displayMetrics
+        ).toInt()
+    }
+}

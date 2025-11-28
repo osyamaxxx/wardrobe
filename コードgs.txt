@@ -1,0 +1,588 @@
+// ===============================
+// ★ 自分のgoogleスプレッドシートのIDとシート名を入れる
+// ===============================
+const SPREADSHEET_ID = '';
+const SHEET_NAME = '';
+
+
+// ===============================
+// ★ 最重要：ページ切り替え
+// ===============================
+function doGet(e) {
+  const page = e && e.parameter && e.parameter.page;
+  if (page === "calendar") {
+    return HtmlService.createTemplateFromFile('calendar')
+      .evaluate()
+      .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL)
+      .setTitle("カレンダー");
+  }
+
+  if (page === "coord") {
+    return HtmlService.createTemplateFromFile('coord')
+      .evaluate()
+      .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL)
+      .setTitle("コーデ作成");
+  }
+
+  if (page === "detail") {
+    return HtmlService.createTemplateFromFile('coordDetail')
+      .evaluate()
+      .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL)
+      .setTitle("コーデ詳細");
+  }
+
+  // ★ 追加：アイテム別コーデ一覧
+  if (page === "itemCoords") {
+    return HtmlService.createTemplateFromFile('itemCoords')
+      .evaluate()
+      .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL)
+      .setTitle("アイテム別コーデ");
+  }
+
+  return HtmlService.createTemplateFromFile('index')
+    .evaluate()
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL)
+    .setTitle("Wardrobe");
+}
+
+// ===============================
+// ★ index のURLを返す（戻るや画面遷移用）
+// ===============================
+/**
+ * サービス公開URLを返す。クライアントからの画面遷移に使用。
+ * @returns {string} GAS WebアプリのURL
+ */
+function getIndexUrl() {
+  return ScriptApp.getService().getUrl();
+}
+
+// ===============================
+// ★ スプレッドシートから服一覧を返す（高速版）
+// ===============================
+/**
+ * アイテムシートから全アイテム情報を取得する。
+ * 全件データキャッシュ(3600秒)を利用し、初回アクセス時以外は高速。
+ * @param {string} category - フィルタリングしたいカテゴリ名 ('すべて'で全件)
+ * @returns {Array<Object>} アイテムオブジェクトの配列
+ */
+function getItems(category) {
+  const cache = CacheService.getScriptCache();
+  const cacheKey = 'items_all';
+  // 1. キャッシュから取得（爆速）
+  const cached = cache.get(cacheKey);
+  if (cached) {
+    const all = JSON.parse(cached);
+    return category === "すべて"
+      ? all
+      : all.filter(i => i.category === category);
+  }
+
+  // 2. キャッシュが無い場合：シート読み込み（ここだけ少し重い）
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sh = ss.getSheetByName(SHEET_NAME);
+  const values = sh.getDataRange().getValues();
+  const header = values.shift();
+
+  const col = {
+    id: header.indexOf("ID"),
+    cat: header.indexOf("カテゴリ"),
+    brand: header.indexOf("ブランド"),
+    price: header.indexOf("価格"),
+    purchaseDate: header.indexOf("購入時期"),
+    usage: header.indexOf("使用回数"),
+    img: header.indexOf("画像URL")
+  };
+  const allItems = values
+    .filter(r => r[col.id])
+    .map(r => ({
+      id: r[col.id],
+      category: r[col.cat],
+      brand: r[col.brand],
+      price: r[col.price],
+      purchaseDate: r[col.purchaseDate], 
+      usage: r[col.usage],
+      costPerUse: (r[col.usage] > 0 ? Math.round(r[col.price] / r[col.usage]) : null),
+      imageUrl: r[col.img] || ""
+    }));
+
+  // 3. キャッシュ保存（3600秒 = 1時間）
+  cache.put(cacheKey, JSON.stringify(allItems), 3600);
+
+  // 4. カテゴリで返す
+  return category === "すべて"
+    ? allItems
+    : allItems.filter(i => i.category === category);
+}
+
+
+// ===============================
+// ★ コーデ保存
+// ===============================
+/**
+ * コーデデータをスプレッドシートに保存し、使用アイテムの使用回数を更新する。
+ * @param {Object} payload - { date: 'YYYY-MM-DD', items: [{id, left, top, width, zIndex}, ...] }
+ * @returns {string} 'ok'
+ */
+function saveCoordData(payload) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const coordSheetName = 'コーデ';
+  let coordSheet = ss.getSheetByName(coordSheetName);
+  // シートがなければ作る（保険）
+  if (!coordSheet) {
+    coordSheet = ss.insertSheet(coordSheetName);
+    coordSheet.appendRow(['日付', 'JSON', '使用アイテムID']);
+  }
+
+  const date = payload.date;               // '2025-11-21' みたいな文字列
+  const items = payload.items || [];
+  // {id, left, top, width, zIndex} の配列
+  const itemIds = Array.from(
+    new Set(items.map(i => i.id))          // 同じアイテムを複数置いても1回としてカウント
+  ).join(',');
+  coordSheet.appendRow([
+    date,
+    JSON.stringify(payload),
+    itemIds
+  ]);
+  // 使用回数アップデート
+  updateUsageCounts(items.map(i => i.id));
+
+  // アイテムの使用回数が更新されたため、アイテム関連のキャッシュを削除する
+  CacheService.getScriptCache().remove('items_all');
+  CacheService.getScriptCache().remove('items_meta_map');
+
+  // **********************************************
+  // **【重要】コーデが追加された月のカレンダーキャッシュを強制的に削除**
+  // **********************************************
+  const dateParts = date.split('-'); // 'YYYY-MM-DD' -> ['YYYY', 'MM', 'DD']
+  const year = dateParts[0];
+  const month = dateParts[1];
+  const coordCacheKey = `coords_${year}_${month}`;
+
+  // 該当月のキャッシュキーを削除するわ
+  CacheService.getScriptCache().remove(coordCacheKey);
+
+  return 'ok';
+}
+
+// ===============================
+// ★ 使用回数を増やす
+// ===============================
+/**
+ * 指定されたアイテムIDリストに基づいて、アイテムシートの使用回数を更新する。
+ * @param {Array<string>} itemIdList - 使用されたアイテムIDの配列
+ */
+function updateUsageCounts(itemIdList) {
+  if (!itemIdList || itemIdList.length === 0) return;
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sh = ss.getSheetByName(SHEET_NAME);
+  const values = sh.getDataRange().getValues();
+  const header = values[0];
+
+  const colId = header.indexOf('ID');
+  const colUsage = header.indexOf('使用回数');
+
+  if (colId === -1 || colUsage === -1) {
+    throw new Error('ID または 使用回数 の列が見つからないわよ…');
+  }
+
+  // ID → 行番号 のマップ作成
+  const idToRow = {};
+  for (let r = 1; r < values.length; r++) {
+    const id = values[r][colId];
+    if (id) {
+      idToRow[id] = r + 1;
+      // シートの行番号（1始まり）
+    }
+  }
+
+  const uniqueIds = Array.from(new Set(itemIdList));
+  uniqueIds.forEach(id => {
+    const row = idToRow[id];
+    if (!row) return;
+
+    // シートにアクセスして値を更新
+    const cell = sh.getRange(row, colUsage + 1); // index→列番号
+    const current = Number(cell.getValue()) || 0;
+    cell.setValue(current + 1);
+  });
+}
+
+// ===============================
+// ★ 指定月のコーデ一覧を返す（カレンダー用）
+// ===============================
+/**
+ * 指定月のコーデ一覧を返す。アイテムの画像URLを付与。
+ * 月単位のキャッシュ(600秒)を利用し高速化。
+ * @param {number} year - 年 (e.g., 2025)
+ * @param {number} month - 月 (1〜12)
+ * @returns {Array<Object>} コーデデータの配列。{ date: 'YYYY-MM-DD', items: [{id, left, top, width, zIndex, imageUrl}, ...] }
+ */
+function getCoordsForMonth(year, month) {
+  const cache = CacheService.getScriptCache();
+  const key = `coords_${year}_${month}`;
+
+  // 1. キャッシュがあれば即返す（爆速）
+  const cached = cache.get(key);
+  if (cached) return JSON.parse(cached);
+
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const coordSheet = ss.getSheetByName('コーデ');
+  if (!coordSheet) return [];
+
+  const lastRow = coordSheet.getLastRow();
+  if (lastRow < 2) return [];
+  // 2. 必要な列だけ取得（高速化ポイント: A列=日付 / B列=JSON）
+  const range = coordSheet.getRange(2, 1, lastRow - 1, 2).getValues();
+
+  // 3. アイテム一覧は一括取得（高速キャッシュ版を利用）
+  const items = getItemsMap_(); 
+
+  const result = [];
+  const targetYM = `${year}-${String(month).padStart(2, '0')}-`;
+  range.forEach(([dateVal, jsonText]) => {
+    if (!dateVal || !jsonText) return;
+
+    // 日付を文字列に統一（補助関数利用）
+    const dateStr = normalizeDateString_(dateVal);
+
+    // 指定月でフィルタリング
+    if (!dateStr.startsWith(targetYM)) return;
+
+    const payload = JSON.parse(jsonText);
+    const itemsWithMeta = (payload.items || []).map(it => ({
+      id: it.id,
+      left: it.left || 0,
+      top: it.top || 0,
+      width: it.width || 120,
+      zIndex: it.zIndex || 0,
+      imageUrl: items[it.id]?.imageUrl || ""
+    }));
+
+    result.push({
+      date: dateStr,
+      items: itemsWithMeta
+    });
+  });
+
+  // 4. キャッシュ保存（600秒 = 10分）
+  cache.put(key, JSON.stringify(result), 600);
+
+  return result;
+}
+
+// ===============================
+// ★ 特定の日付のコーデ詳細を返す
+// ===============================
+/**
+ * 指定日付のコーデ詳細と、使用アイテムのメタデータ（ブランド、価格など）を返す。
+ * @param {string} dateStr - 日付文字列 ('YYYY-MM-DD' 形式)
+ * @returns {?Object} コーデデータ。{ date: 'YYYY-MM-DD', items: [{...アイテムメタデータ, left, top, width, zIndex}, ...] }
+ */
+function getCoordForDate(dateStr) {
+  const cache = CacheService.getScriptCache();
+  const key = `coord_date_${dateStr}`;
+
+  // **キャッシュ期間を3600秒（1時間）に延長**
+  const cached = cache.get(key);
+  if (cached) return JSON.parse(cached);
+
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const coordSheet = ss.getSheetByName('コーデ');
+  if (!coordSheet) return null;
+
+  const lastRow = coordSheet.getLastRow();
+  if (lastRow < 2) return null;
+  const range = coordSheet.getRange(2, 1, lastRow - 1, 2).getValues();
+  // 既存の高速キャッシュ版を利用
+  const itemsMeta = getItemsMetaMap_(); 
+
+  let found = null;
+  const target = dateStr;
+
+  range.forEach(([dateVal, jsonText]) => {
+    if (!dateVal || !jsonText) return;
+
+    const dStr = normalizeDateString_(dateVal); // 補助関数に統一
+    if (dStr !== target) return;
+
+    const payload = JSON.parse(jsonText);
+    const itemList = (payload.items || []).map(it => {
+      const meta = itemsMeta[it.id] || {};
+      return {
+        ...it,
+        imageUrl: meta.imageUrl || "",
+        category: meta.category || "",
+        brand: meta.brand || "",
+        price: meta.price || 0,
+        usage: meta.usage || 0,
+        costPerUse: meta.costPerUse,
+        purchaseDate: meta.purchaseDate || ""
+      };
+    });
+
+    found = { date: target, items: itemList };
+  });
+
+  // **キャッシュ期間を3600秒（1時間）に延長**
+  if (found) cache.put(key, JSON.stringify(found), 3600);
+
+  return found;
+}
+
+// ===============================
+// ★ 特定アイテムの最新コーデ一覧を返す
+// ===============================
+/**
+ * 指定アイテムIDを含むコーデのうち、日付が新しい順に最大 limit 件返す。
+ * **処理の効率化のため、アイテム情報はキャッシュから取得する。**
+ * @param {string} itemId - 対象アイテムのID
+ * @param {number} limit - 最大取得件数 (デフォルト10)
+ * @returns {Array<Object>} コーデデータの配列。{ date: 'YYYY-MM-DD', items: [{id, left, top, width, zIndex, imageUrl}, ...] }
+ */
+function getLatestCoordsByItemId(itemId, limit) {
+  limit = limit || 10;
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+
+  const coordSheetName = 'コーデ';
+  const coordSheet = ss.getSheetByName(coordSheetName);
+  if (!coordSheet) return [];
+  const coordValues = coordSheet.getDataRange().getValues();
+  const coordHeader = coordValues.shift();
+
+  const colDate = coordHeader.indexOf('日付');
+  const colJson = coordHeader.indexOf('JSON');
+  if (colDate === -1 || colJson === -1) {
+    throw new Error('コーデシートに 日付 / JSON 列がないわよ…');
+  }
+
+  // **【効率化】アイテムID → 画像URLマップをキャッシュから取得 (getItemsMap_()を利用)**
+  // これにより、スプレッドシートへのアクセスが不要になるわ。
+  const idToImageMap = getItemsMap_(); 
+  
+  const rows = [];
+  const targetId = String(itemId);
+
+  coordValues.forEach(row => {
+    const d = row[colDate];
+    const jsonText = row[colJson];
+    if (!d || !jsonText) return;
+
+    // 日付オブジェクトに変換
+    let jsDate;
+    if (Object.prototype.toString.call(d) === "[object Date]") {
+      jsDate = d;
+    } else {
+      jsDate = new Date(d);
+    }
+    if (isNaN(jsDate)) return;
+
+    let payload;
+    try {
+      payload = JSON.parse(jsonText);
+    } catch (e) {
+      return;
+    }
+
+    const rawItems = payload.items || [];
+    // このコーデに対象アイテムが含まれるかチェック
+    if (!rawItems.some(it => String(it.id) === targetId)) {
+      return;
+    }
+
+    const items = rawItems.map(it => ({
+      id: it.id,
+      left: it.left || 0,
+      top: it.top || 0,
+      width: it.width || 120,
+      zIndex: it.zIndex || 0,
+      // **【効率化】マップから画像URLを取得**
+      imageUrl: idToImageMap[String(it.id)]?.imageUrl || '' 
+    }));
+
+    // **【保守性】日付文字列の生成に normalizeDateString_ を利用**
+    rows.push({
+      dateObj: jsDate,
+      dateStr: normalizeDateString_(d), 
+      items: items
+    });
+  });
+
+  // 新しい順にソートして limit 件だけ返す
+  rows.sort((a, b) => b.dateObj - a.dateObj);
+  return rows.slice(0, limit).map(r => ({
+    date: r.dateStr,
+    items: r.items
+  }));
+}
+
+/**
+ * 指定アイテムIDを含むコーデを、新しい順に offset から limit 件返す。
+ * ページング対応。
+ */
+function getLatestCoordsByItemIdPaged(itemId, limit, offset) {
+  limit = limit || 10;
+  offset = offset || 0;
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+
+  const coordSheet = ss.getSheetByName('コーデ');
+  if (!coordSheet) return [];
+
+  const coordValues = coordSheet.getDataRange().getValues();
+  const header = coordValues.shift();
+
+  const colDate = header.indexOf('日付');
+  const colJson = header.indexOf('JSON');
+  const idToImageMap = getItemsMap_();  // 画像URL用
+
+  const rows = [];
+  const targetId = String(itemId);
+
+  coordValues.forEach(row => {
+    const d = row[colDate];
+    const jsonText = row[colJson];
+    if (!d || !jsonText) return;
+
+    let dateObj = (Object.prototype.toString.call(d) === "[object Date]") ? d : new Date(d);
+    if (isNaN(dateObj)) return;
+
+    let payload;
+    try { payload = JSON.parse(jsonText); } catch(e) { return; }
+
+    const raw = payload.items || [];
+    if (!raw.some(it => String(it.id) === targetId)) return;
+
+    const mappedItems = raw.map(it => ({
+      id: it.id,
+      left: it.left || 0,
+      top: it.top || 0,
+      width: it.width || 120,
+      zIndex: it.zIndex || 0,
+      imageUrl: idToImageMap[String(it.id)]?.imageUrl || ""
+    }));
+
+    rows.push({
+      dateObj,
+      dateStr: normalizeDateString_(d),
+      items: mappedItems
+    });
+  });
+
+  // 最新順ソート
+  rows.sort((a, b) => b.dateObj - a.dateObj);
+
+  // ★ ページングここ！
+  const sliced = rows.slice(offset, offset + limit);
+
+  return sliced.map(r => ({
+    date: r.dateStr,
+    items: r.items
+  }));
+}
+
+
+// ===============================
+// ★ 補助関数（リネームなし）
+// ===============================
+
+/**
+ * [高速化] アイテムIDをキー、画像URLを値とするマップを返す。
+ * キャッシュ(600秒)を利用。
+ * @returns {Object<string, {imageUrl: string}>} ID→画像URL情報 のマップ
+ */
+function getItemsMap_() {
+  const cache = CacheService.getScriptCache();
+  const key = 'items_map_fast';
+  const cached = cache.get(key);
+  if (cached) return JSON.parse(cached);
+
+  // キャッシュがない場合、スプレッドシートから読み込む
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sh = ss.getSheetByName(SHEET_NAME);
+
+  const values = sh.getDataRange().getValues();
+  const header = values.shift();
+
+  const colId = header.indexOf("ID");
+  const colImg = header.indexOf("画像URL");
+
+  const map = {};
+  values.forEach(r => {
+    const id = r[colId];
+    if (!id) return;
+    map[id] = { imageUrl: r[colImg] || "" };
+  });
+
+  // キャッシュ保存（600秒 = 10分）
+  cache.put(key, JSON.stringify(map), 600);
+  return map;
+}
+
+/**
+ * [高速化] アイテムIDをキー、すべてのメタデータ（価格、使用回数など）を値とするマップを返す。
+ * キャッシュ(3600秒)を利用。
+ * @returns {Object<string, Object>} ID→アイテムメタデータ のマップ
+ */
+function getItemsMetaMap_() {
+  const cache = CacheService.getScriptCache();
+  const key = 'items_meta_map';
+  const cached = cache.get(key);
+  if (cached) return JSON.parse(cached);
+
+  // キャッシュがない場合、スプレッドシートから読み込む
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sh = ss.getSheetByName(SHEET_NAME);
+
+  const values = sh.getDataRange().getValues();
+  const header = values.shift();
+
+  const col = {
+    id: header.indexOf("ID"),
+    cat: header.indexOf("カテゴリ"),
+    brand: header.indexOf("ブランド"),
+    price: header.indexOf("価格"),
+    purchaseDate: header.indexOf("購入時期"),
+    usage: header.indexOf("使用回数"),
+    img: header.indexOf("画像URL")
+  };
+  const map = {};
+  values.forEach(r => {
+    const id = r[col.id];
+    if (!id) return;
+
+    const price = Number(r[col.price]) || 0;
+    const usage = Number(r[col.usage]) || 0;
+
+    map[id] = {
+      category: r[col.cat],
+      brand: r[col.brand],
+      price,
+      usage,
+      costPerUse: usage > 0 ? Math.round(price / usage) : null,
+      imageUrl: r[col.img] || "",
+      purchaseDate: r[col.purchaseDate] || ""
+    };
+  });
+
+  // キャッシュ保存（3600秒 = 1時間）
+  cache.put(key, JSON.stringify(map), 3600);
+  return map;
+}
+
+/**
+ * Dateオブジェクトまたはスプレッドシートの値から 'YYYY-MM-DD' 形式の文字列に変換する。
+ * @param {Date|string} val - 日付データ
+ * @returns {string} 'YYYY-MM-DD' 形式の文字列
+ */
+function normalizeDateString_(val) {
+  if (Object.prototype.toString.call(val) === "[object Date]") {
+    const y = val.getFullYear();
+    const m = String(val.getMonth()+1).padStart(2,'0');
+    const d = String(val.getDate()).padStart(2,'0');
+    return `${y}-${m}-${d}`;
+  }
+  // 文字列の場合、スラッシュをハイフンに変換（例: '2025/11/26' -> '2025-11-26'）
+  return String(val).replace(/\//g, '-');
+}
+  // キャッシュ強制的に消す場合はコメントアウト消す
+  // CacheService.getScriptCache().remove('items_all');

@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+
+  <title>Wardrobe</title>
+
+  <style>
+    body {
+      margin: 0;
+      font-family: sans-serif;
+      background: #f5f5f5;
+      padding-bottom: 50px;  /* ★ フッターが隠さない余白を確保 */
+      box-sizing: border-box;
+    }
+
+    header {
+      padding: 10px 12px;
+      background: #222;
+      color: #fff;
+      font-size: 16px;
+    }
+
+    /* --------- カテゴリバー（coord と同じ UI） --------- */
+    #categoryBar {
+      border-bottom: 1px solid #ddd;
+      padding: 6px 10px;
+      height: 40px;
+      overflow-x: auto;
+      white-space: nowrap;
+      display: flex;
+      flex-direction: row;
+      gap: 12px;
+      background: #fff;
+      align-items: center;
+    }
+
+    .cat-btn {
+      padding: 0;
+      margin-right: 16px;
+      font-size: 15px;
+      cursor: pointer;
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    .cat-btn:hover {
+      border-bottom: 2px solid #ccc;
+    }
+
+    .cat-btn.active {
+      font-weight: bold;
+      border-bottom: 2px solid #333;
+    }
+
+    /* --------- グリッド --------- */
+    .grid {
+      padding: 12px;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+      gap: 12px;
+    }
+
+    .card {
+      border: 1px solid #eee;
+      border-radius: 8px;
+      padding: 6px;
+      font-size: 12px;
+      background: #fff;
+      transition: transform 0.1s ease, background-color 0.1s ease, box-shadow 0.1s ease;
+    }
+
+    .card:hover {
+      transform: scale(1.03);
+      box-shadow: 0 4px 12px rgba(0,0,0,0.20);
+    }
+
+    .card:active {
+      transform: scale(0.95);
+      background-color: #eaeaea;
+      box-shadow: none;
+    }
+
+    .card img {
+      width: 100%;
+      border-radius: 8px;
+      margin-bottom: 6px;
+    }
+
+    /* スマホ 4列固定 */
+    @media screen and (max-width: 1200px),
+           screen and (orientation: portrait),
+           screen and (max-device-width: 900px) {
+      .grid {
+        grid-template-columns: repeat(4, 1fr) !important;
+      }
+      .cat-btn {
+        padding: 8px 14px !important;
+        font-size: 14px !important;
+      }
+    }
+
+    #sortLabel {
+      color: #111;
+      pointer-events: none;
+    }
+
+    #footerNav {
+      height: 45px;  /* この値を確定させる */
+    }
+
+    .sort-box {
+      position: fixed;
+      bottom: 80px;
+      right: 20px;
+      background: #fff;
+      padding: 10px 14px;
+      border-radius: 10px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.15);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      z-index: 9999;
+      cursor: pointer;
+    }
+
+    .sort-arrow {
+      font-size: 12px;
+    }
+
+    .sort-menu {
+      position: fixed;
+      bottom: 135px;
+      right: 20px;
+      background: white;
+      border-radius: 10px;
+      box-shadow: 0 3px 12px rgba(0,0,0,0.2);
+      display: none;  /* ← 初期は非表示 */
+      flex-direction: column;
+      overflow: hidden;
+      z-index: 9999;
+    }
+
+    .sort-menu div {
+      padding: 12px 18px;
+      font-size: 14px;
+      border-bottom: 1px solid #eee;
+      background: #fff;
+    }
+
+    .sort-menu div:last-child {
+      border-bottom: none;
+    }
+
+    .sort-menu div:hover {
+      background: #f5f5f5;
+    }
+
+
+  </style>
+</head>
+
+<body>
+
+<header>ワードローブ</header>
+
+<div id="categoryBar"></div>
+
+<div class="sort-box" onclick="toggleSortMenu()">
+  <span id="sortLabel">ソート</span>
+  <span class="sort-arrow">▼</span>
+</div>
+
+<div id="sortMenu" class="sort-menu">
+  <div onclick="selectSort('usage_desc')">使用回数 多い順</div>
+  <div onclick="selectSort('usage_asc')">使用回数 少ない順</div>
+  <div onclick="selectSort('date_new')">購入時期 新しい順</div>
+  <div onclick="selectSort('date_old')">購入時期 古い順</div>
+</div>
+
+
+<div class="grid" id="grid"></div>
+
+<script>
+
+  /* ======== カテゴリ定義（重複削除） ======== */
+  const categories = [
+    'Tシャツ','ボトムス','アウター','パーカー・スウェット',
+    '長袖シャツ','半袖シャツ','帽子','シューズ','バッグ','腕時計','アクセサリー'
+  ];
+
+  let itemCache = {};   
+  let currentCategory = '帽子';
+  let latestItems = [];
+
+  /* ======== 初期化 ======== */
+  function init(){
+    renderCategoryButtons();
+    loadItems(currentCategory);
+  }
+
+  /* ======== カテゴリ描画 ======== */
+  function renderCategoryButtons(){
+    const bar = document.getElementById('categoryBar');
+    bar.innerHTML = '';
+
+    categories.forEach(cat => {
+      const btn = document.createElement('div');
+      btn.textContent = cat;
+      btn.className = 'cat-btn' + (cat === currentCategory ? ' active' : '');
+
+      btn.onclick = () => {
+        currentCategory = cat;
+        document.querySelectorAll('.cat-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        loadItems(cat);
+      };
+
+      bar.appendChild(btn);
+    });
+  }
+
+  /* ======== アイテム取得 ======== */
+  function loadItems(category){
+    const grid = document.getElementById('grid');
+
+    if (itemCache[category]) {
+      renderItems(itemCache[category]);
+    } else {
+      grid.innerHTML = '読み込み中…';
+    }
+
+    google.script.run
+      .withSuccessHandler(allItems => {
+        // 全データをカテゴリ別に仕分け
+        const grouped = {};
+        categories.forEach(cat => grouped[cat] = []);
+
+        allItems.forEach(item => {
+          const cat = item.category || '不明';
+          if (!grouped[cat]) grouped[cat] = [];
+          grouped[cat].push(item);
+        });
+
+        // キャッシュへ全カテゴリ保存
+        itemCache = grouped;
+
+        // 今選んでるカテゴリを表示
+        renderItems(itemCache[currentCategory]);
+      })
+      .getItems('すべて'); // ← getItems は全件取得用として使う
+  }
+
+  /* ======== カード生成（共通関数化） ======== */
+  function createCard(item){
+    const card = document.createElement('div');
+    card.className = 'card';
+
+    card.innerHTML = `
+      <img src="${item.imageUrl}">
+      <div><b>${item.brand || '-'}</b></div>
+      <div>価格：${item.price || 0}円</div>
+      <div>購入：${formatPurchaseLabel(item.purchaseDate)}</div>
+      <div>着用：${item.usage || 0}回</div>
+      <div>コスパ：${item.costPerUse != null ? item.costPerUse + '円/回' : '未使用'}</div>
+    `;
+
+    card.onclick = () => openItemCoords(item);
+
+    return card;
+  }
+
+  /* ======== 一覧描画 ======== */
+  function renderItems(items){
+    latestItems = items;
+    const grid = document.getElementById('grid');
+    grid.innerHTML = '';
+
+    items.forEach(item => grid.appendChild(createCard(item)));
+  }
+
+  function applySort(mode){
+    latestItems.sort((a, b) => {
+      switch(mode){
+        case "usage_desc": return (b.usage || 0) - (a.usage || 0);
+        case "usage_asc":  return (a.usage || 0) - (b.usage || 0);
+        case "date_new":   return (b.purchaseDate || "").localeCompare(a.purchaseDate || "");
+        case "date_old":   return (a.purchaseDate || "").localeCompare(b.purchaseDate || "");
+      }
+    });
+
+    renderItems(latestItems);
+  }
+
+
+
+  function toggleSortMenu() {
+    const menu = document.getElementById("sortMenu");
+    menu.style.display = menu.style.display === "flex" ? "none" : "flex";
+  }
+
+  function selectSort(mode) {
+    // ラベル変更
+    document.getElementById("sortLabel").textContent =
+      document.querySelector(`[onclick="selectSort('${mode}')"]`).textContent;
+
+    // メニューを閉じる
+    document.getElementById("sortMenu").style.display = "none";
+
+    // 直接 applySort に mode を渡す！
+    applySort(mode);
+  }
+
+
+  /* ======== ソート（ASC/DESC を一つに） ======== */
+  function sortItems(asc){
+    latestItems.sort((a, b) =>
+      asc ? (a.usage||0) - (b.usage||0)
+          : (b.usage||0) - (a.usage||0)
+    );
+    renderItems(latestItems);
+  }
+
+  /* ======== 個別コーデページへ ======== */
+  function openItemCoords(item){
+    google.script.run.withSuccessHandler(url => {
+      const exec = url.replace(/\/(dev|usercallback)/, '/exec');
+
+      const target = exec
+        + '?page=itemCoords'
+        + '&id=' + encodeURIComponent(item.id)
+        + '&img=' + encodeURIComponent(item.imageUrl || '')
+        + '&v=' + Date.now();
+
+      window.top.location.href = target;
+    }).getIndexUrl();
+  }
+
+  function formatPurchaseLabel(ym) {
+    if (!ym) return "-";
+
+    const [y, m] = ym.split("-").map(Number);
+    const now = new Date();
+    const ny = now.getFullYear();
+    const nm = now.getMonth() + 1;
+
+    // 経過月数
+    const diffMonths = (ny - y) * 12 + (nm - m);
+
+    if (diffMonths <= 1) {
+      return "最近";
+    } else if (diffMonths < 12) {
+      return diffMonths + "ヶ月前";
+    } else {
+      const years = Math.floor(diffMonths / 12);
+      if (years < 5) return years + "年前";
+      if (years < 10) return "5年以上前";
+      return "10年以上前";
+    }
+  }
+
+  window.onload = init;
+
+</script>
+
+<?!= HtmlService.createHtmlOutputFromFile('footer').getContent(); ?>
+
+</body>
+</html>
